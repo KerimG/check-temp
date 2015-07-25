@@ -1,0 +1,141 @@
+#!/usr/bin/perl
+
+# Nagios plugin for IPMI sensors status checking.
+#
+# Especially useful on Dell Poweredge servers, and others that
+# implement the Intelligent Platform Management Interface (IPMI)
+# interface.
+#
+# (C) Chris Wilson <check_ipmi@qwirx.com>, 2005-06-04
+# Released under the GNU General Public License (GPL)
+
+# added nr state by Thomas Lange, 2008
+# added %nvalue, $maxtemp, $shutdown, $mstring
+# modified for daemon running process, Mark Sprenger, Uni Koeln 2008
+# modified to include list of exceptions, Kerim Gueney, Uni Koeln 2014
+
+$|=1;
+
+use warnings;
+use strict;
+use Sys::Hostname;
+
+#####CONFIG VARS#######
+my $hightemp  = 86; # if one temp is higher than this, do not sleep at the end (=> check more often)
+my $maxtemp   = 88; # shutdown host if temp is greater than this
+my $maxtemp   = 98; # shutdown host if temp is greater than this
+my $global_sleeptime = 300; # time too sleep if all temp are low
+my $hostname = hostname;
+my @exceptions = qw/kueppers/; # list of computers to be ignored
+######################
+
+my $shutdown = 0;
+my $mstring;
+my $high_temp_msg=0;
+my @out;
+my $sleeptime;
+
+
+print "...starting daemon: temperatur-check ... \n with limits: hightemperatur -> $hightemp , maxtemperatur -> $maxtemp (leeds to shutdown!!!)\n";
+open(FH,">/var/run/check-temp.pid") or die "cannot open filehandle $!";
+print FH $$;
+close (FH);
+
+
+sub trim ($) {
+	my ($v) = @_;
+	$v =~ s/^ +//;
+	$v =~ s/ +$//;
+	return $v;
+}
+
+while(1){
+my %found;
+my %bad;
+my %nvalue; # store numeric value (without degrees C or RPM)
+-c "/dev/ipmi0" or die "No /dev/ipmi0 available\n";
+open IPMI, "ipmitool sdr |" or die "ipmitool: $!";
+
+while (my $line = <IPMI>)
+{
+	chomp $line;
+	unless ($line =~ m'^(.*) \| (.*) \| (\w+)$') { die "Bad format in ipmitool output: $line";}
+
+	my $name  = trim $1;
+	my $value = trim $2;
+	my $state = trim $3;
+	$name =~ tr| |_|;
+
+	my $counter = 1;
+	my $uname = "$name";
+	while ($found{$uname}) {
+	  $uname = $name . $counter++;
+	}
+
+	next if $state eq "ns";
+	next if $state eq "nr";
+
+	if ($state ne "ok") {$bad{$uname} = $state;}
+
+	$found{$uname} = $value;
+	($value =~ m/(\d+)/) and $nvalue{$uname} = $1;
+}
+close IPMI;
+
+print time," ";
+
+if (keys %bad) {
+	print "IPMI critical: ";
+	my @bad;
+	foreach my $name (sort keys %bad) {
+		push @bad, "$name is $bad{$name}";
+	}
+	print join(", ", @bad) . " ";
+} else {
+	print "IPMI ok ";
+}
+
+@out=();
+
+foreach my $name (sort keys %found) {
+#	next unless $name =~ m|Fan| or $name =~ m|Temp|;
+	next unless $name =~ m|Temp|;
+#	push @out, "$name = $found{$name}";
+	push @out, "$name = $nvalue{$name}";
+      }
+
+print "(" . join(", ", @out) . ")\n";
+
+if (!($hostname ~~ @exceptions)) {
+  foreach my $name (sort keys %found) {
+      if ($name =~ m|Temp| && $nvalue{$name} > $maxtemp) {
+      warn "System shutdown because of $name: $nvalue{$name}\n";
+      $mstring .= "System shutdown because of $name: $nvalue{$name}\n";
+      $shutdown = 1;
+    }
+  }
+}
+
+if ($shutdown) {
+  warn "Now shutting down\n$mstring";
+  $mstring .= "IPMI ALARM. Shutdown now!\n";
+  system("(echo \"$mstring\";uname -n;date;echo;ipmitool sdr) | mailx sysadmin");
+  system("date; echo 'Now suspending to disk'; sleep 10;echo disk > /sys/power/state");
+  exit 1;
+}
+
+$sleeptime=$global_sleeptime;
+foreach my $name (sort keys %found) {
+  if ($name =~ m|Temp| && $nvalue{$name} > $hightemp) {
+	if(!$high_temp_msg){
+	      $mstring = "IPMI ALARM. HIGH TEMPERATURE!! BUT NO SHUTDOWN!!!\n";
+      	      system("(echo \"$mstring\";uname -n;date;echo;ipmitool sdr) | mailx sysadmin");
+	      $high_temp_msg=1;
+	      }
+      $sleeptime = 120;
+  }
+}
+$high_temp_msg=0 if ($sleeptime==$global_sleeptime);
+sleep ($sleeptime);
+
+} #end of while(1)
