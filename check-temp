@@ -10,7 +10,7 @@
 # Released under the GNU General Public License (GPL)
 
 # added nr state by Thomas Lange, 2008
-# added %nvalue, $maxtemp, $shutdown, $mstring
+# added %nvalue, $settings{max_temp}, $shutdown, $mstring
 # modified for daemon running process, Mark Sprenger, Uni Koeln 2008
 # modified to include list of exceptions, Kerim Gueney, Uni Koeln 2014
 
@@ -21,10 +21,7 @@ use strict;
 use Sys::Hostname;
 
 #####CONFIG VARS#######
-my $hightemp  = 86; # if one temp is higher than this, do not sleep at the end (=> check more often)
-my $maxtemp   = 88; # shutdown host if temp is greater than this
-my $maxtemp   = 98; # shutdown host if temp is greater than this
-my $global_sleeptime = 300; # time too sleep if all temp are low
+my %settings;
 my $hostname = hostname;
 my @exceptions = qw/kueppers/; # list of computers to be ignored
 ######################
@@ -32,11 +29,21 @@ my @exceptions = qw/kueppers/; # list of computers to be ignored
 my $shutdown = 0;
 my $mstring;
 my $high_temp_msg=0;
-my @out;
 my $sleeptime;
+my @out;
 
 
-print "...starting daemon: temperatur-check ... \n with limits: hightemperatur -> $hightemp , maxtemperatur -> $maxtemp (leeds to shutdown!!!)\n";
+# read configuration file
+open SETTINGS, "check-temp.conf" or die;
+while (my $line=<SETTINGS>) {
+   chomp($line);
+   (my $key, my $value) = split /=/, $line;
+   $settings{$key} = $value;
+}
+close (SETTINGS);
+
+
+print "...starting daemon: temperatur-check ... \n with limits: hightemperatur -> $settings{high_temp} , maxtemperatur -> $settings{max_temp} (leads to shutdown!!!)\n";
 open(FH,">/var/run/check-temp.pid") or die "cannot open filehandle $!";
 print FH $$;
 close (FH);
@@ -106,36 +113,48 @@ foreach my $name (sort keys %found) {
 
 print "(" . join(", ", @out) . ")\n";
 
-if (!($hostname ~~ @exceptions)) {
+
+
+if (!($hostname ~~ @exceptions)){
   foreach my $name (sort keys %found) {
-      if ($name =~ m|Temp| && $nvalue{$name} > $maxtemp) {
-      warn "System shutdown because of $name: $nvalue{$name}\n";
-      $mstring .= "System shutdown because of $name: $nvalue{$name}\n";
-      $shutdown = 1;
+      if ($name =~ m|Temp| && $nvalue{$name} > $settings{max_temp} && $shutdown == 0) {
+	warn "$hostname reached max temperature because of $name: $nvalue{$name}\n";
+	# $mstring .= "System shutdown because of $name: $nvalue{$name}\n";
+	if ($settings{max_temp_action}) {
+	  $mstring .= "IPMI ALARM. MAX TEMPERATURE REACHED!\nEXECUTING: $settings{max_temp_action}";
+	  # system("(echo \"$mstring\";uname -n;date;echo;ipmitool sdr) | mailx sysadmin");
+	  system("$settings{max_temp_action}");
+	  exit $settings{max_temp_exit} if $settings{max_temp_exit};
+	}
+	else {
+	  $shutdown = 1;
+	}
+      }
     }
-  }
 }
 
 if ($shutdown) {
-  warn "Now shutting down\n$mstring";
+  warn "Now shutting down\n";
   $mstring .= "IPMI ALARM. Shutdown now!\n";
-  system("(echo \"$mstring\";uname -n;date;echo;ipmitool sdr) | mailx sysadmin");
-  system("date; echo 'Now suspending to disk'; sleep 10;echo disk > /sys/power/state");
+ # system("(echo \"$mstring\";uname -n;date;echo;ipmitool sdr) | mailx sysadmin");
+ # system("date; echo 'Now suspending to disk'; sleep 10;echo disk > /sys/power/state");
   exit 1;
 }
 
-$sleeptime=$global_sleeptime;
+$sleeptime=$settings{sleeptime};
 foreach my $name (sort keys %found) {
-  if ($name =~ m|Temp| && $nvalue{$name} > $hightemp) {
+  if ($name =~ m|Temp| && $nvalue{$name} > $settings{high_temp}) {
+
 	if(!$high_temp_msg){
 	      $mstring = "IPMI ALARM. HIGH TEMPERATURE!! BUT NO SHUTDOWN!!!\n";
-      	      system("(echo \"$mstring\";uname -n;date;echo;ipmitool sdr) | mailx sysadmin");
+#      	      system("(echo \"$mstring\";uname -n;date;echo;ipmitool sdr) | mailx sysadmin");
+	      system("$settings{high_temp_action}") if ($settings{high_temp_action});
 	      $high_temp_msg=1;
 	      }
       $sleeptime = 120;
   }
 }
-$high_temp_msg=0 if ($sleeptime==$global_sleeptime);
+$high_temp_msg=0 if ($sleeptime==$settings{sleeptime});
 sleep ($sleeptime);
 
 } #end of while(1)
